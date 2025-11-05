@@ -181,6 +181,7 @@ def cluster_matches(keypoints, matches, eps=30, min_samples=3):
 def analyze_cluster_validity(keypoints, matches, cluster_labels, min_area=100, max_repetition_ratio=0.3):
     """
     Analyze clusters to filter out false positives from repetitive patterns.
+    Uses advanced heuristics to detect brick walls, tiles, grids, and other regular patterns.
     
     Args:
         keypoints: List of keypoints
@@ -209,19 +210,30 @@ def analyze_cluster_validity(keypoints, matches, cluster_labels, min_area=100, m
         
         # Calculate cluster statistics
         cluster_points = []
+        offset_vectors = []
         offset_magnitudes = []
+        offset_angles = []
         
         for match in cluster_matches:
             pt1 = keypoints[match.queryIdx].pt
             pt2 = keypoints[match.trainIdx].pt
             cluster_points.append(pt1)
             
-            # Offset magnitude
-            offset_mag = np.sqrt((pt2[0] - pt1[0])**2 + (pt2[1] - pt1[1])**2)
+            # Offset vector and magnitude
+            dx = pt2[0] - pt1[0]
+            dy = pt2[1] - pt1[1]
+            offset_vectors.append([dx, dy])
+            offset_mag = np.sqrt(dx**2 + dy**2)
             offset_magnitudes.append(offset_mag)
+            
+            # Offset angle (for detecting grid patterns)
+            angle = np.arctan2(dy, dx)
+            offset_angles.append(angle)
         
         cluster_points = np.array(cluster_points)
+        offset_vectors = np.array(offset_vectors)
         offset_magnitudes = np.array(offset_magnitudes)
+        offset_angles = np.array(offset_angles)
         
         # Calculate bounding box area
         if len(cluster_points) > 0:
@@ -231,25 +243,91 @@ def analyze_cluster_validity(keypoints, matches, cluster_labels, min_area=100, m
         else:
             area = 0
         
-        # Calculate offset consistency
-        # Repetitive patterns have varying offset magnitudes (copies in many directions)
-        # True forgeries have consistent offset magnitudes (one direction)
+        # 1. Offset Consistency (original metric)
         offset_mean = offset_magnitudes.mean()
         offset_std = offset_magnitudes.std()
-        repetition_score = offset_std / (offset_mean + 1e-6)  # Avoid division by zero
+        repetition_score = offset_std / (offset_mean + 1e-6)
         
-        # Validity criteria
+        # 2. Geometric Regularity Detection (NEW)
+        # Check if offset vectors form a regular grid pattern
+        angle_std = np.std(offset_angles)
+        angle_consistency = angle_std < 0.1  # Very consistent angles = likely grid
+        
+        # 3. Spatial Distribution Analysis (NEW)
+        # Calculate the distribution of source points
+        # Repetitive patterns have evenly spaced source points
+        if len(cluster_points) > 3:
+            # Calculate pairwise distances between source points
+            from scipy.spatial.distance import pdist
+            pairwise_distances = pdist(cluster_points)
+            dist_std = np.std(pairwise_distances)
+            dist_mean = np.mean(pairwise_distances)
+            spatial_regularity = dist_std / (dist_mean + 1e-6)
+            
+            # Low spatial regularity = points are evenly spaced = likely pattern
+            is_spatially_regular = spatial_regularity < 0.5
+        else:
+            spatial_regularity = 1.0
+            is_spatially_regular = False
+        
+        # 4. Density Check (NEW)
+        # Repetitive patterns tend to have high match density
+        if area > 0:
+            density = len(cluster_matches) / area
+            is_high_density = density > 0.01  # More than 1 match per 100 pixels²
+        else:
+            density = 0
+            is_high_density = False
+        
+        # 5. Combined Pattern Detection Score (NEW)
+        # Higher score = more likely to be a repetitive pattern
+        pattern_score = 0
+        pattern_reasons = []
+        
+        if repetition_score > max_repetition_ratio:
+            pattern_score += 2
+            pattern_reasons.append("inconsistent_offsets")
+        
+        if angle_consistency and len(cluster_matches) > 10:
+            pattern_score += 3
+            pattern_reasons.append("geometric_grid")
+        
+        if is_spatially_regular and len(cluster_matches) > 8:
+            pattern_score += 2
+            pattern_reasons.append("regular_spacing")
+        
+        if is_high_density and len(cluster_matches) > 15:
+            pattern_score += 1
+            pattern_reasons.append("high_density")
+        
+        # Validity criteria (ENHANCED)
         is_valid = (
             area >= min_area and  # Large enough region
-            repetition_score <= max_repetition_ratio  # Consistent offset (not repetitive pattern)
+            pattern_score < 3  # Not a repetitive pattern (threshold: 3 points)
         )
+        
+        # Classification
+        if pattern_score >= 5:
+            classification = "REPETITIVE_PATTERN"
+        elif pattern_score >= 3:
+            classification = "LIKELY_PATTERN"
+        elif pattern_score >= 1:
+            classification = "UNCERTAIN"
+        else:
+            classification = "VALID_FORGERY"
         
         cluster_stats[label] = {
             'num_matches': len(cluster_matches),
             'area': area,
+            'density': density,
             'offset_mean': offset_mean,
             'offset_std': offset_std,
             'repetition_score': repetition_score,
+            'angle_std': angle_std,
+            'spatial_regularity': spatial_regularity,
+            'pattern_score': pattern_score,
+            'pattern_reasons': pattern_reasons,
+            'classification': classification,
             'is_valid': is_valid
         }
         

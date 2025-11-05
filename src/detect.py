@@ -14,7 +14,7 @@ from utils import (
 
 def detect_copy_move_forgery(image_path, method='sift', min_distance=30, 
                               eps=30, min_samples=3, visualize=True, 
-                              save_output=True, output_dir='results'):
+                              save_output=True, output_dir='results', run_benchmark=False):
     """
     Detect copy-move forgery in an image using feature-based method.
     
@@ -27,10 +27,14 @@ def detect_copy_move_forgery(image_path, method='sift', min_distance=30,
         visualize: Whether to show visualizations
         save_output: Whether to save output images
         output_dir: Directory to save output images
+        run_benchmark: Whether to run performance comparison with legacy methods
     
     Returns:
         Dictionary containing detection results
     """
+    import time
+    start_time = time.time()
+    
     # Read the image
     image = load_image(image_path)
     if image is None:
@@ -77,10 +81,16 @@ def detect_copy_move_forgery(image_path, method='sift', min_distance=30,
     validity_info = analyze_cluster_validity(keypoints, matches, cluster_labels)
     valid_clusters = validity_info['valid_clusters']
     n_valid = validity_info['n_valid']
+    cluster_stats = validity_info['stats']
     
     print(f"Valid clusters after filtering: {n_valid}/{n_clusters}")
     if n_valid < n_clusters:
         print(f"  → Filtered out {n_clusters - n_valid} cluster(s) (likely repetitive patterns)")
+        # Show why clusters were filtered
+        for label, stats in cluster_stats.items():
+            if not stats['is_valid']:
+                reasons = ', '.join(stats['pattern_reasons'])
+                print(f"     Cluster {label}: {stats['classification']} ({reasons})")
     
     # Create forgery masks for valid clusters only
     masks = []
@@ -161,7 +171,23 @@ def detect_copy_move_forgery(image_path, method='sift', min_distance=30,
         else:
             plt.close()
     
+    # Generate HTML report if saving output
+    if save_output:
+        from report_generator import generate_html_report
+        report_result = {
+            'n_keypoints': len(keypoints),
+            'n_matches': len(matches),
+            'n_clusters': n_clusters,
+            'n_valid_clusters': n_valid,
+            'mask': combined_mask,
+            'forgery_detected': forgery_detected,
+            'confidence': confidence,
+        }
+        generate_html_report(image_path, report_result, output_dir, cluster_stats)
+    
     # Print final verdict
+    processing_time = time.time() - start_time
+    
     print("\n" + "="*60)
     if forgery_detected:
         print(f"🔴 VERDICT: FORGERY DETECTED (Confidence: {confidence})")
@@ -171,10 +197,11 @@ def detect_copy_move_forgery(image_path, method='sift', min_distance=30,
     else:
         print("✓ VERDICT: NO FORGERY DETECTED")
         print("   → Image appears to be authentic")
+    print(f"   ⏱️  Processing time: {processing_time:.3f}s")
     print("="*60 + "\n")
 
-    # Return results
-    return {
+    # Prepare result dictionary
+    result = {
         'n_keypoints': len(keypoints),
         'n_matches': len(matches),
         'n_clusters': n_clusters,
@@ -182,8 +209,16 @@ def detect_copy_move_forgery(image_path, method='sift', min_distance=30,
         'mask': combined_mask,
         'forgery_detected': forgery_detected,
         'confidence': confidence,
-        'validity_info': validity_info
+        'validity_info': validity_info,
+        'processing_time': processing_time
     }
+    
+    # Run benchmark comparison if requested
+    if run_benchmark and save_output:
+        from benchmark import benchmark_comparison
+        benchmark_comparison(image_path, result, output_dir)
+    
+    return result
 
 
 def evaluate_on_dataset(dataset_name, data_dir, method='sift', max_images=None):
@@ -280,6 +315,7 @@ def main():
     parser.add_argument('--min_samples', type=int, default=3, help='DBSCAN min_samples parameter')
     parser.add_argument('--max_images', type=int, default=None, help='Maximum number of images to process')
     parser.add_argument('--no_visualize', action='store_true', help='Do not show visualizations')
+    parser.add_argument('--benchmark', action='store_true', help='Run performance comparison with legacy methods')
     
     args = parser.parse_args()
     
@@ -293,7 +329,8 @@ def main():
             eps=args.eps,
             min_samples=args.min_samples,
             visualize=not args.no_visualize,
-            save_output=True
+            save_output=True,
+            run_benchmark=args.benchmark
         )
         
         if result:
